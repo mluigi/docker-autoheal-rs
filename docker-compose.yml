@@ -1,0 +1,29 @@
+services:
+  autoheal-rs:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
+      - AUTOHEAL_WATCH_CRASHES=true
+      - AUTOHEAL_EXCLUDE_EXIT_CODES=0
+      - ALERT_COOLDOWN_SECS=300
+      - MAX_ALERTS_PER_CONTAINER=3
+      - ALERT_WINDOW_SECS=1800
+      - METRICS_ADDR=0.0.0.0:9090
+      - HEARTBEAT_URL=
+      - HEARTBEAT_INTERVAL_SECS=60
+      - SMTP_HOST=
+      - SMTP_PORT=587
+      - SMTP_TLS=true
+      - SMTP_USER=
+      - SMTP_PASS=
+      - ALERT_FROM=Autoheal <alerts@localhost>
+      - ALERT_TO=admin@localhost
+      - SLACK_WEBHOOK_URL=
+      - DISCORD_WEBHOOK_URL=
+      - GENERIC_WEBHOOK_URL=

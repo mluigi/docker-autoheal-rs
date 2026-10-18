@@ -1,0 +1,24 @@
+[package]
+name = "docker-autoheal-rs"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+bollard = "0.18"
+futures-util = "0.3"
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+lettre = { version = "0.11", default-features = false, features = [
+    "tokio1",
+    "tokio1-rustls-tls",
+    "smtp-transport",
+    "builder",
+    "hostname"
+] }
+askama = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"

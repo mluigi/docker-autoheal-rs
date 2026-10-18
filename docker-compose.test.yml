@@ -1,0 +1,61 @@
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  autoheal-rs:
+    build: .
+    ports:
+      - "9090:9090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=2
+      - AUTOHEAL_WATCH_CRASHES=true
+      - AUTOHEAL_EXCLUDE_EXIT_CODES=0
+      - ALERT_COOLDOWN_SECS=3
+      - MAX_ALERTS_PER_CONTAINER=2
+      - ALERT_WINDOW_SECS=60
+      - METRICS_ADDR=0.0.0.0:9090
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+      - SMTP_TLS=false
+      - ALERT_FROM=Autoheal <autoheal@test.local>
+      - ALERT_TO=devops@test.local
+    depends_on:
+      - mailpit
+
+  flaky-app:
+    image: alpine:latest
+    container_name: flaky-test-container
+    labels:
+      - "autoheal=true"
+      - "autoheal.stop.timeout=1"
+    command: >
+      sh -c "touch /tmp/healthy &&
+             echo 'Container started healthy. Sabotaging in 5 seconds...' &&
+             sleep 5 &&
+             rm -f /tmp/healthy &&
+             echo 'Health file removed! Waiting for autoheal to restart me...' &&
+             sleep 300"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy || (echo 'CRITICAL: /tmp/healthy missing!' && exit 1)"]
+      interval: 2s
+      timeout: 1s
+      retries: 1
+      start_period: 1s
+
+  crashing-app:
+    image: alpine:latest
+    container_name: crashing-test-container
+    labels:
+      - "autoheal=true"
+      - "autoheal.stop.timeout=1"
+    command: >
+      sh -c "echo 'App running without healthcheck. Crashing in 6 seconds with exit code 42...' &&
+             sleep 6 &&
+             echo 'Fatal error: database pool exhausted!' &&
+             exit 42"
