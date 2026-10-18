@@ -434,6 +434,21 @@ async fn heal_container(
         .and_then(|t| t.parse::<isize>().ok())
         .unwrap_or(config.restart_timeout);
 
+    // Check for explicit opt-out label (useful when AUTOHEAL_CONTAINER_LABEL=all)
+    if let Some(labels) = inspect.config.as_ref().and_then(|c| c.labels.as_ref()) {
+        if labels.get("autoheal").map(|s| s.as_str()) == Some("false")
+            || (config.target_label != "all"
+                && labels.get(&config.target_label).map(|s| s.as_str()) == Some("false"))
+        {
+            info!(
+                "Container '{}' ({}) has explicit opt-out label; skipping heal.",
+                name,
+                &container_id[..12.min(container_id.len())]
+            );
+            return Ok(());
+        }
+    }
+
     let (status_str, reason_desc) = match &reason {
         HealReason::UnhealthyHealthcheck => (
             "UNHEALTHY".to_string(),

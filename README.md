@@ -40,15 +40,33 @@ Configure `docker-autoheal-rs` using environment variables:
 
 ---
 
-## Per-Container Labels
+## Monitoring Modes & Container Labels
 
-Add these labels to any containers you want managed:
+You control which containers are monitored using the `AUTOHEAL_CONTAINER_LABEL` **environment variable** on `docker-autoheal-rs`:
 
+### Mode 1: Selective Opt-In (Default)
+Set `AUTOHEAL_CONTAINER_LABEL=autoheal` (or leave as default). Only containers labeled with `autoheal=true` will be watched:
 ```yaml
+# On the target container:
 labels:
   - "autoheal=true"
   - "autoheal.stop.timeout=5"   # Optional: custom stop timeout in seconds
 ```
+
+### Mode 2: Watch Everything (`AUTOHEAL_CONTAINER_LABEL=all`)
+Set `AUTOHEAL_CONTAINER_LABEL=all` in `docker-autoheal-rs` environment:
+```yaml
+# In docker-autoheal-rs:
+environment:
+  - AUTOHEAL_CONTAINER_LABEL=all
+```
+- In this mode, **all containers** on the Docker daemon are monitored automatically — **no labels required** on target containers.
+- **Opt-Out:** If you want to exclude a specific container from auto-healing while in `all` mode, add `autoheal=false`:
+  ```yaml
+  # On the excluded container:
+  labels:
+    - "autoheal=false"
+  ```
 
 ---
 
