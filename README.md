@@ -9,7 +9,7 @@ An ultra-lightweight, zero-polling Rust replacement for `willfarrell/docker-auto
 - **Restart Loop Circuit Breaker:** Features a sliding-window alert limiter (`MAX_ALERTS_PER_CONTAINER`, `ALERT_WINDOW_SECS`) and per-container debouncing (`ALERT_COOLDOWN_SECS`) to prevent notification storms when containers enter flapping/crash loops.
 - **Multi-Channel Alerting:** Concurrently alerts via **SMTP Email** (compiled-in responsive HTML + plain text multipart via `askama` and `lettre`), **Slack**, **Discord**, and **Generic Webhooks**.
 - **Observability:** Built-in Prometheus `/metrics` and `/healthz` endpoints served on port `9090`, plus an optional Dead-Man's Switch heartbeat task (`HEARTBEAT_URL`).
-- **Minimal Scratch Container:** Compiles with `musl` into a pure static binary and runs in a `FROM scratch` image under **9 MB** with pure-Rust TLS (`rustls`).
+- **Minimal Scratch Container:** Multi-platform (`linux/amd64`, `linux/arm64`) image under **9 MB**, compiled with `musl` into a pure static binary running in `FROM scratch` with pure-Rust TLS (`rustls`).
 
 ---
 
