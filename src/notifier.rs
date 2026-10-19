@@ -202,3 +202,31 @@ impl NotificationHub {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_alert_payload_renders_html() {
+        let payload = AlertPayload {
+            alert_title: "Test Alert".to_string(),
+            container_name: "test-redis".to_string(),
+            container_id: "1234567890ab".to_string(),
+            image: "redis:alpine".to_string(),
+            status: "UNHEALTHY".to_string(),
+            action_result: "Restarted successfully".to_string(),
+            last_health_log: "PONG failed".to_string(),
+            timestamp: "2026-10-19 12:00:00 UTC".to_string(),
+        };
+
+        let rendered = payload.render().expect("Failed to render alert template");
+        assert!(rendered.contains("Test Alert"));
+        assert!(rendered.contains("test-redis"));
+        assert!(rendered.contains("1234567890ab"));
+        assert!(rendered.contains("redis:alpine"));
+        assert!(rendered.contains("UNHEALTHY"));
+        assert!(rendered.contains("Restarted successfully"));
+        assert!(rendered.contains("PONG failed"));
+    }
+}

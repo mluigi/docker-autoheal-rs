@@ -1,5 +1,7 @@
 # docker-autoheal-rs 🦀
 
+[![CI](https://github.com/mluigi/docker-autoheal-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/mluigi/docker-autoheal-rs/actions/workflows/ci.yml)
+
 An ultra-lightweight, zero-polling Rust replacement for `willfarrell/docker-autoheal`.
 
 - **Real-Time Event Streaming:** Directly subscribes to Docker Engine's `/events` API (`health_status: unhealthy` and `die` crash events) via `/var/run/docker.sock` without costly polling loops.

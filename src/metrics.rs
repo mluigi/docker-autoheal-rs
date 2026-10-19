@@ -198,3 +198,33 @@ pub async fn run_dead_mans_switch(docker: Docker) {
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_metrics_recording_and_prometheus_rendering() {
+        let registry = MetricsRegistry::new();
+        registry.record_restart("redis-cache", true).await;
+        registry.record_restart("redis-cache", true).await;
+        registry.record_restart("api-gateway", false).await;
+        registry.record_reconnect();
+        registry.record_alert_sent();
+        registry.record_alert_silenced("cooldown");
+        registry.record_alert_silenced("circuit_breaker");
+
+        let prometheus = registry.render_prometheus(true).await;
+        assert!(prometheus.contains("autoheal_docker_connected 1"));
+        assert!(prometheus.contains("autoheal_restarts_total{status=\"success\"} 2"));
+        assert!(prometheus.contains("autoheal_restarts_total{status=\"failed\"} 1"));
+        assert!(prometheus.contains("autoheal_stream_reconnects_total 1"));
+        assert!(prometheus.contains("autoheal_alerts_sent_total 1"));
+        assert!(prometheus.contains("autoheal_alerts_silenced_total{reason=\"cooldown\"} 1"));
+        assert!(prometheus.contains("autoheal_alerts_silenced_total{reason=\"circuit_breaker\"} 1"));
+        assert!(prometheus.contains("autoheal_container_restarts_total{container=\"redis-cache\"} 2"));
+
+        let prometheus_down = registry.render_prometheus(false).await;
+        assert!(prometheus_down.contains("autoheal_docker_connected 0"));
+    }
+}

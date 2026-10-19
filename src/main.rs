@@ -387,6 +387,7 @@ async fn get_container_logs(docker: &Docker, container_id: &str, tail: usize) ->
     combined.trim().chars().take(800).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn heal_container(
     docker: &Docker,
     container_id: &str,
@@ -572,4 +573,100 @@ async fn heal_container(
 
     restart_res?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_alert_decision_normal_and_cooldown() {
+        let mut state = ContainerAlertState::default();
+        let cooldown = Duration::from_secs(10);
+        let max_alerts = 3;
+        let window = Duration::from_secs(60);
+        let t0 = Instant::now();
+
+        // 1. Initial alert sends normal
+        let d1 = evaluate_alert(&mut state, cooldown, max_alerts, window, t0);
+        assert!(matches!(d1, AlertDecision::SendNormal));
+        assert_eq!(state.alert_timestamps.len(), 1);
+
+        // 2. Alert before cooldown expires is suppressed
+        let t1 = t0 + Duration::from_secs(5);
+        let d2 = evaluate_alert(&mut state, cooldown, max_alerts, window, t1);
+        assert!(matches!(d2, AlertDecision::SuppressedCooldown));
+        assert_eq!(state.alert_timestamps.len(), 1);
+
+        // 3. Alert after cooldown succeeds
+        let t2 = t0 + Duration::from_secs(12);
+        let d3 = evaluate_alert(&mut state, cooldown, max_alerts, window, t2);
+        assert!(matches!(d3, AlertDecision::SendNormal));
+        assert_eq!(state.alert_timestamps.len(), 2);
+    }
+
+    #[test]
+    fn test_circuit_breaker_tripping_and_reset() {
+        let mut state = ContainerAlertState::default();
+        let cooldown = Duration::from_secs(5);
+        let max_alerts = 2;
+        let window = Duration::from_secs(30);
+        let t0 = Instant::now();
+
+        // Alert 1
+        assert!(matches!(
+            evaluate_alert(&mut state, cooldown, max_alerts, window, t0),
+            AlertDecision::SendNormal
+        ));
+
+        // Alert 2
+        let t1 = t0 + Duration::from_secs(6);
+        assert!(matches!(
+            evaluate_alert(&mut state, cooldown, max_alerts, window, t1),
+            AlertDecision::SendNormal
+        ));
+        assert_eq!(state.alert_timestamps.len(), 2);
+
+        // Alert 3: hits max_alerts within window -> trips circuit breaker notice
+        let t2 = t0 + Duration::from_secs(12);
+        let d3 = evaluate_alert(&mut state, cooldown, max_alerts, window, t2);
+        match d3 {
+            AlertDecision::SendCircuitBreakerNotice { count, window_secs } => {
+                assert_eq!(count, 2);
+                assert_eq!(window_secs, 30);
+            }
+            _ => panic!("Expected circuit breaker notice"),
+        }
+        assert!(state.circuit_breaker_active);
+
+        // Alert 4: while tripped, alerts are suppressed by circuit breaker
+        let t3 = t0 + Duration::from_secs(18);
+        assert!(matches!(
+            evaluate_alert(&mut state, cooldown, max_alerts, window, t3),
+            AlertDecision::SuppressedCircuitBreaker
+        ));
+
+        // Alert 5: after window passes (>30s from t0 and t1), timestamps are pruned
+        let t4 = t0 + Duration::from_secs(38);
+        assert!(matches!(
+            evaluate_alert(&mut state, cooldown, max_alerts, window, t4),
+            AlertDecision::SendNormal
+        ));
+        assert!(!state.circuit_breaker_active);
+    }
+
+    #[test]
+    fn test_circuit_breaker_disabled_when_zero() {
+        let mut state = ContainerAlertState::default();
+        let cooldown = Duration::from_secs(2);
+        let max_alerts = 0; // disabled
+        let window = Duration::from_secs(60);
+        let t0 = Instant::now();
+
+        for i in 0..5 {
+            let t = t0 + Duration::from_secs(i * 3);
+            let d = evaluate_alert(&mut state, cooldown, max_alerts, window, t);
+            assert!(matches!(d, AlertDecision::SendNormal));
+        }
+    }
 }
