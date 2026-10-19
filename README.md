@@ -20,6 +20,7 @@ Configure `docker-autoheal-rs` using environment variables:
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `AUTOHEAL_CONTAINER_LABEL` | `autoheal` | Target container label filter (`autoheal=true` or `all` to watch all containers). |
+| `AUTOHEAL_DEFAULT_MODE` | `manage` | Default container mode (`manage` = restart on failure, `listen` = alert only without restart). |
 | `AUTOHEAL_DEFAULT_STOP_TIMEOUT` | `10` | Default timeout in seconds before force killing a container during restart. |
 | `AUTOHEAL_WATCH_CRASHES` | `true` | Watch for unexpected container exit/crash events (`die`). |
 | `AUTOHEAL_EXCLUDE_EXIT_CODES` | `0` | Comma-separated exit codes to ignore (e.g., graceful stops). |
@@ -52,6 +53,7 @@ Set `AUTOHEAL_CONTAINER_LABEL=autoheal` (or leave as default). Only containers l
 # On the target container:
 labels:
   - "autoheal=true"
+  - "autoheal.mode=manage"       # Options: "manage" (restart on fail) or "listen" (alert only)
   - "autoheal.stop.timeout=5"   # Optional: custom stop timeout in seconds
 ```
 
@@ -72,13 +74,30 @@ environment:
 
 ---
 
+### Action Modes: Manage vs. Listen
+
+Control whether `docker-autoheal-rs` actively restarts containers or only listens and alerts:
+
+1. **Global Default Mode (`AUTOHEAL_DEFAULT_MODE`):**
+   - `AUTOHEAL_DEFAULT_MODE=manage` (Default): Containers without an explicit mode label default to **manage** (auto-restart and alert).
+   - `AUTOHEAL_DEFAULT_MODE=listen`: Containers without an explicit mode label default to **listen** (alert and metrics only, no restarts). When paired with `AUTOHEAL_CONTAINER_LABEL=all`, all containers on your Docker host are safely monitored in dry-run mode without modifying their labels!
+
+2. **Per-Container Override (`autoheal.mode` or `autoheal.action`):**
+   Override the default mode on any individual container using labels:
+   - `autoheal.mode=listen` (or `autoheal.action=listen`): Listen-only for this container (alert on incident, skip restart).
+   - `autoheal.mode=manage` (or `autoheal.action=manage`): Always restart this container on failure, even if `AUTOHEAL_DEFAULT_MODE=listen` is set globally.
+
+---
+
 ## Quick Start (Production)
 
+Pull and run the prebuilt multi-arch image directly from GitHub Container Registry (GHCR):
+
+### Docker Compose
 ```yaml
 services:
   autoheal-rs:
-    image: docker-autoheal-rs:latest
-    build: .
+    image: ghcr.io/mluigi/docker-autoheal-rs:latest
     restart: unless-stopped
     ports:
       - "9090:9090"
@@ -86,10 +105,23 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_DEFAULT_MODE=manage
       - ALERT_COOLDOWN_SECS=300
       - MAX_ALERTS_PER_CONTAINER=3
       - ALERT_WINDOW_SECS=1800
       - SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+```
+
+### Docker CLI
+```bash
+docker run -d \
+  --name autoheal-rs \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -p 9090:9090 \
+  -e AUTOHEAL_CONTAINER_LABEL=autoheal \
+  -e AUTOHEAL_DEFAULT_MODE=manage \
+  ghcr.io/mluigi/docker-autoheal-rs:latest
 ```
 
 ---

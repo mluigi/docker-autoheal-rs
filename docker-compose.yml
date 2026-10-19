@@ -1,5 +1,6 @@
 services:
   autoheal-rs:
+    image: ghcr.io/mluigi/docker-autoheal-rs:latest
     build: .
     restart: unless-stopped
     ports:
@@ -8,6 +9,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_DEFAULT_MODE=manage
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
       - AUTOHEAL_WATCH_CRASHES=true
       - AUTOHEAL_EXCLUDE_EXIT_CODES=0

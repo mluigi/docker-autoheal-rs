@@ -14,11 +14,13 @@ use tracing::{error, info, warn};
 pub struct MetricsRegistry {
     pub restarts_succeeded: AtomicU64,
     pub restarts_failed: AtomicU64,
+    pub listen_only_incidents: AtomicU64,
     pub stream_reconnects: AtomicU64,
     pub alerts_sent: AtomicU64,
     pub alerts_silenced_cooldown: AtomicU64,
     pub alerts_silenced_circuit_breaker: AtomicU64,
     pub per_container_restarts: RwLock<HashMap<String, u64>>,
+    pub per_container_listen_incidents: RwLock<HashMap<String, u64>>,
 }
 
 impl MetricsRegistry {
@@ -34,6 +36,12 @@ impl MetricsRegistry {
         } else {
             self.restarts_failed.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub async fn record_listen_incident(&self, container_name: &str) {
+        self.listen_only_incidents.fetch_add(1, Ordering::Relaxed);
+        let mut map = self.per_container_listen_incidents.write().await;
+        *map.entry(container_name.to_string()).or_insert(0) += 1;
     }
 
     pub fn record_reconnect(&self) {
@@ -70,6 +78,13 @@ impl MetricsRegistry {
             self.restarts_failed.load(Ordering::Relaxed)
         ));
 
+        out.push_str("# HELP autoheal_listen_only_incidents_total Total incidents detected in listen-only mode.\n");
+        out.push_str("# TYPE autoheal_listen_only_incidents_total counter\n");
+        out.push_str(&format!(
+            "autoheal_listen_only_incidents_total {}\n\n",
+            self.listen_only_incidents.load(Ordering::Relaxed)
+        ));
+
         out.push_str("# HELP autoheal_stream_reconnects_total Total Docker event stream reconnections.\n");
         out.push_str("# TYPE autoheal_stream_reconnects_total counter\n");
         out.push_str(&format!(
@@ -104,6 +119,19 @@ impl MetricsRegistry {
                 name.replace('"', "\\\""),
                 count
             ));
+        }
+
+        let listen_map = self.per_container_listen_incidents.read().await;
+        if !listen_map.is_empty() {
+            out.push_str("\n# HELP autoheal_container_listen_incidents_total Incidents in listen-only mode broken down by container name.\n");
+            out.push_str("# TYPE autoheal_container_listen_incidents_total counter\n");
+            for (name, count) in listen_map.iter() {
+                out.push_str(&format!(
+                    "autoheal_container_listen_incidents_total{{container=\"{}\"}} {}\n",
+                    name.replace('"', "\\\""),
+                    count
+                ));
+            }
         }
 
         out
@@ -213,16 +241,19 @@ mod tests {
         registry.record_alert_sent();
         registry.record_alert_silenced("cooldown");
         registry.record_alert_silenced("circuit_breaker");
+        registry.record_listen_incident("worker-queue").await;
 
         let prometheus = registry.render_prometheus(true).await;
         assert!(prometheus.contains("autoheal_docker_connected 1"));
         assert!(prometheus.contains("autoheal_restarts_total{status=\"success\"} 2"));
         assert!(prometheus.contains("autoheal_restarts_total{status=\"failed\"} 1"));
+        assert!(prometheus.contains("autoheal_listen_only_incidents_total 1"));
         assert!(prometheus.contains("autoheal_stream_reconnects_total 1"));
         assert!(prometheus.contains("autoheal_alerts_sent_total 1"));
         assert!(prometheus.contains("autoheal_alerts_silenced_total{reason=\"cooldown\"} 1"));
         assert!(prometheus.contains("autoheal_alerts_silenced_total{reason=\"circuit_breaker\"} 1"));
         assert!(prometheus.contains("autoheal_container_restarts_total{container=\"redis-cache\"} 2"));
+        assert!(prometheus.contains("autoheal_container_listen_incidents_total{container=\"worker-queue\"} 1"));
 
         let prometheus_down = registry.render_prometheus(false).await;
         assert!(prometheus_down.contains("autoheal_docker_connected 0"));

@@ -16,6 +16,50 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ContainerMode {
+    Manage,
+    Listen,
+}
+
+impl ContainerMode {
+    pub fn is_listen(self) -> bool {
+        self == ContainerMode::Listen
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "listen" | "monitor" => Some(ContainerMode::Listen),
+            "manage" | "heal" | "restart" => Some(ContainerMode::Manage),
+            _ => None,
+        }
+    }
+}
+
+pub fn resolve_container_mode(
+    labels: Option<&HashMap<String, String>>,
+    default_mode: ContainerMode,
+) -> ContainerMode {
+    if let Some(labels) = labels {
+        // 1. Check autoheal.mode or autoheal.action
+        let mode_val = labels
+            .get("autoheal.mode")
+            .or_else(|| labels.get("autoheal.action"));
+
+        if let Some(m) = mode_val.and_then(|s| ContainerMode::from_str(s)) {
+            return m;
+        }
+
+        // 2. Also check if autoheal label itself is set to listen/manage (e.g. autoheal=listen)
+        if let Some(m) = labels.get("autoheal").and_then(|s| ContainerMode::from_str(s)) {
+            return m;
+        }
+    }
+
+    // Default per container falls back to global default_mode
+    default_mode
+}
+
 struct AppConfig {
     target_label: String,
     restart_timeout: isize,
@@ -24,6 +68,7 @@ struct AppConfig {
     exclude_exit_codes: Vec<i64>,
     max_alerts: usize,
     alert_window: Duration,
+    default_mode: ContainerMode,
 }
 
 #[derive(Default)]
@@ -94,6 +139,21 @@ async fn main() -> Result<()> {
         .filter_map(|s| s.trim().parse::<i64>().ok())
         .collect();
 
+    let default_mode = env::var("AUTOHEAL_DEFAULT_MODE")
+        .ok()
+        .and_then(|v| ContainerMode::from_str(&v))
+        .or_else(|| {
+            env::var("AUTOHEAL_ONLY_LISTEN").ok().and_then(|v| {
+                let v = v.trim().to_lowercase();
+                if v == "true" || v == "1" || v == "yes" {
+                    Some(ContainerMode::Listen)
+                } else {
+                    Some(ContainerMode::Manage)
+                }
+            })
+        })
+        .unwrap_or(ContainerMode::Manage);
+
     let config = Arc::new(AppConfig {
         target_label: env::var("AUTOHEAL_CONTAINER_LABEL").unwrap_or_else(|_| "autoheal".into()),
         restart_timeout: env::var("AUTOHEAL_DEFAULT_STOP_TIMEOUT")
@@ -120,6 +180,7 @@ async fn main() -> Result<()> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1800),
         ),
+        default_mode,
     });
 
     let docker = Docker::connect_with_socket_defaults()
@@ -143,7 +204,8 @@ async fn main() -> Result<()> {
     tokio::spawn(metrics::run_dead_mans_switch(docker.clone()));
 
     info!(
-        "Starting docker-autoheal-rs (Label filter: '{}', Watch crashes: {}, Max alerts: {}/{}s, Cooldown: {}s)",
+        "Starting docker-autoheal-rs (Default mode: {:?}, Label filter: '{}', Watch crashes: {}, Max alerts: {}/{}s, Cooldown: {}s)",
+        config.default_mode,
         config.target_label,
         config.watch_crashes,
         config.max_alerts,
@@ -435,8 +497,10 @@ async fn heal_container(
         .and_then(|t| t.parse::<isize>().ok())
         .unwrap_or(config.restart_timeout);
 
+    let container_labels = inspect.config.as_ref().and_then(|c| c.labels.as_ref());
+
     // Check for explicit opt-out label (useful when AUTOHEAL_CONTAINER_LABEL=all)
-    if let Some(labels) = inspect.config.as_ref().and_then(|c| c.labels.as_ref()) {
+    if let Some(labels) = container_labels {
         if labels.get("autoheal").map(|s| s.as_str()) == Some("false")
             || (config.target_label != "all"
                 && labels.get(&config.target_label).map(|s| s.as_str()) == Some("false"))
@@ -450,6 +514,8 @@ async fn heal_container(
         }
     }
 
+    let mode = resolve_container_mode(container_labels, config.default_mode);
+
     let (status_str, reason_desc) = match &reason {
         HealReason::UnhealthyHealthcheck => (
             "UNHEALTHY".to_string(),
@@ -461,37 +527,58 @@ async fn heal_container(
         ),
     };
 
-    warn!(
-        "Container '{}' ({}) is {}. Restarting (timeout: {}s)...",
-        name,
-        &container_id[..12.min(container_id.len())],
-        status_str,
-        timeout
-    );
-
-    // Register in-flight restart to ignore the Docker 'die' event emitted during restart
-    in_flight_restarts
-        .lock()
-        .await
-        .insert(container_id.to_string(), Instant::now());
-
-    let restart_res = docker
-        .restart_container(container_id, Some(RestartContainerOptions { t: timeout }))
-        .await;
-
-    let action_result = match &restart_res {
-        Ok(_) => {
-            info!("Container '{}' restarted successfully.", name);
-            metrics.record_restart(&name, true).await;
+    let (action_result, restart_err) = if mode == ContainerMode::Listen {
+        warn!(
+            "Container '{}' ({}) is {}. Listen-only mode active: skipping restart, evaluating alerts...",
+            name,
+            &container_id[..12.min(container_id.len())],
+            status_str
+        );
+        metrics.record_listen_incident(&name).await;
+        (
             format!(
-                "Successfully restarted (reason: {}, stop timeout: {}s)",
-                reason_desc, timeout
-            )
-        }
-        Err(e) => {
-            error!("Container '{}' failed to restart: {:?}", name, e);
-            metrics.record_restart(&name, false).await;
-            format!("Restart failed: {}", e)
+                "Listen-only mode: container is {} ({}), no restart performed",
+                status_str, reason_desc
+            ),
+            None,
+        )
+    } else {
+        warn!(
+            "Container '{}' ({}) is {}. Restarting (timeout: {}s)...",
+            name,
+            &container_id[..12.min(container_id.len())],
+            status_str,
+            timeout
+        );
+
+        // Register in-flight restart to ignore the Docker 'die' event emitted during restart
+        in_flight_restarts
+            .lock()
+            .await
+            .insert(container_id.to_string(), Instant::now());
+
+        let restart_res = docker
+            .restart_container(container_id, Some(RestartContainerOptions { t: timeout }))
+            .await;
+
+        match restart_res {
+            Ok(_) => {
+                info!("Container '{}' restarted successfully.", name);
+                metrics.record_restart(&name, true).await;
+                (
+                    format!(
+                        "Successfully restarted (reason: {}, stop timeout: {}s)",
+                        reason_desc, timeout
+                    ),
+                    None,
+                )
+            }
+            Err(e) => {
+                error!("Container '{}' failed to restart: {:?}", name, e);
+                metrics.record_restart(&name, false).await;
+                let msg = format!("Restart failed: {}", e);
+                (msg, Some(e))
+            }
         }
     };
 
@@ -509,14 +596,26 @@ async fn heal_container(
 
     match decision {
         AlertDecision::SendNormal => {
-            let alert_title = match &reason {
-                HealReason::UnhealthyHealthcheck => {
-                    "⚠️ Container Unhealthy — Restart Triggered".to_string()
+            let alert_title = if mode == ContainerMode::Listen {
+                match &reason {
+                    HealReason::UnhealthyHealthcheck => {
+                        "⚠️ [LISTEN ONLY] Container Unhealthy — Incident Detected".to_string()
+                    }
+                    HealReason::CrashOrExit { exit_code } => format!(
+                        "💥 [LISTEN ONLY] Container Crashed (Code {}) — Incident Detected",
+                        exit_code
+                    ),
                 }
-                HealReason::CrashOrExit { exit_code } => format!(
-                    "💥 Container Crashed (Code {}) — Restart Triggered",
-                    exit_code
-                ),
+            } else {
+                match &reason {
+                    HealReason::UnhealthyHealthcheck => {
+                        "⚠️ Container Unhealthy — Restart Triggered".to_string()
+                    }
+                    HealReason::CrashOrExit { exit_code } => format!(
+                        "💥 Container Crashed (Code {}) — Restart Triggered",
+                        exit_code
+                    ),
+                }
             };
 
             let payload = AlertPayload {
@@ -540,8 +639,14 @@ async fn heal_container(
             metrics.record_alert_sent();
             metrics.record_alert_silenced("circuit_breaker");
 
+            let alert_title = if mode == ContainerMode::Listen {
+                "🛑 Frequent Failures Detected — Alert Limit Reached (Silenced)".to_string()
+            } else {
+                "🛑 Restart Loop Detected — Alert Limit Reached (Silenced)".to_string()
+            };
+
             let payload = AlertPayload {
-                alert_title: "🛑 Restart Loop Detected — Alert Limit Reached (Silenced)".to_string(),
+                alert_title,
                 container_name: name.clone(),
                 container_id: container_id.chars().take(12).collect(),
                 image,
@@ -571,7 +676,9 @@ async fn heal_container(
         }
     }
 
-    restart_res?;
+    if let Some(e) = restart_err {
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -668,5 +775,66 @@ mod tests {
             let d = evaluate_alert(&mut state, cooldown, max_alerts, window, t);
             assert!(matches!(d, AlertDecision::SendNormal));
         }
+    }
+
+    #[test]
+    fn test_resolve_container_mode() {
+        // 1. Without labels, respects global default_mode
+        assert_eq!(
+            resolve_container_mode(None, ContainerMode::Manage),
+            ContainerMode::Manage
+        );
+        assert_eq!(
+            resolve_container_mode(None, ContainerMode::Listen),
+            ContainerMode::Listen
+        );
+
+        // 2. autoheal.mode=listen overrides global Manage default
+        let mut labels_listen = HashMap::new();
+        labels_listen.insert("autoheal.mode".to_string(), "listen".to_string());
+        assert_eq!(
+            resolve_container_mode(Some(&labels_listen), ContainerMode::Manage),
+            ContainerMode::Listen
+        );
+
+        // 3. autoheal.mode=manage overrides global Listen default (per-container manage when default is listen)
+        let mut labels_manage = HashMap::new();
+        labels_manage.insert("autoheal.mode".to_string(), "manage".to_string());
+        assert_eq!(
+            resolve_container_mode(Some(&labels_manage), ContainerMode::Listen),
+            ContainerMode::Manage
+        );
+
+        // 4. autoheal.action=listen
+        let mut labels_action_listen = HashMap::new();
+        labels_action_listen.insert("autoheal.action".to_string(), "listen".to_string());
+        assert_eq!(
+            resolve_container_mode(Some(&labels_action_listen), ContainerMode::Manage),
+            ContainerMode::Listen
+        );
+
+        // 5. autoheal.action=manage
+        let mut labels_action_manage = HashMap::new();
+        labels_action_manage.insert("autoheal.action".to_string(), "manage".to_string());
+        assert_eq!(
+            resolve_container_mode(Some(&labels_action_manage), ContainerMode::Listen),
+            ContainerMode::Manage
+        );
+
+        // 6. autoheal=listen
+        let mut labels_val_listen = HashMap::new();
+        labels_val_listen.insert("autoheal".to_string(), "listen".to_string());
+        assert_eq!(
+            resolve_container_mode(Some(&labels_val_listen), ContainerMode::Manage),
+            ContainerMode::Listen
+        );
+
+        // 7. Case insensitivity and whitespace trimming
+        let mut labels_case = HashMap::new();
+        labels_case.insert("autoheal.mode".to_string(), " LISTEN ".to_string());
+        assert_eq!(
+            resolve_container_mode(Some(&labels_case), ContainerMode::Manage),
+            ContainerMode::Listen
+        );
     }
 }
